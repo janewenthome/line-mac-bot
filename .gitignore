@@ -1,0 +1,8 @@
+.venv/
+chroma_db/
+playwright_profile/
+__pycache__/
+.env
+*.m4a
+*.pdf
+.DS_Store

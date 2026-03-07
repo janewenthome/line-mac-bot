@@ -1,0 +1,378 @@
+"""
+build_vector_db.py
+====================
+將 Obsidian Vault 裡的 .md / .pdf / .docx / .xlsx 檔案轉成向量，
+存入本地 ChromaDB（./chroma_db）。
+支援「增量更新」——只重新索引修改時間有變動的檔案。
+
+使用方式：
+    python3 build_vector_db.py
+
+排程：app.py 中 APScheduler 每 2 小時自動執行本腳本。
+"""
+
+import os
+import time
+import hashlib
+from datetime import datetime
+
+import chromadb
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+
+
+# ── 選用套件（軟依賴，缺少時優雅降級）────────────────────────────────────────
+try:
+    from pypdf import PdfReader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    print("[VectorDB] ⚠️  pypdf 未安裝，PDF 將略過。請執行：pip3 install pypdf")
+
+try:
+    import docx as docx_module
+    DOCX_SUPPORT = True
+except ImportError:
+    DOCX_SUPPORT = False
+    print("[VectorDB] ⚠️  python-docx 未安裝，DOCX 將略過。請執行：pip3 install python-docx")
+
+try:
+    import openpyxl
+    XLSX_SUPPORT = True
+except ImportError:
+    XLSX_SUPPORT = False
+    print("[VectorDB] ⚠️  openpyxl 未安裝，XLSX 將略過。請執行：pip3 install openpyxl")
+
+try:
+    from pptx import Presentation as PptxPresentation
+    PPTX_SUPPORT = True
+except ImportError:
+    PPTX_SUPPORT = False
+    print("[VectorDB] ⚠️  python-pptx 未安裝，PPTX 將略過。請執行：pip3 install python-pptx")
+
+# ── 環境設定 ─────────────────────────────────────────────────────────────────
+load_dotenv()
+
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+OBSIDIAN_VAULT_PATH = "/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain"
+BASE_DIR = os.path.expanduser("~/line-mac-bot")
+CHROMA_DB_PATH = os.path.join(BASE_DIR, "chroma_db")
+COLLECTION_NAME = "obsidian_notes"
+
+# 每個文件最大 chunk 字元數
+CHUNK_SIZE = 1200
+# 相鄰 chunk 之間的重疊字元數
+CHUNK_OVERLAP = 150
+# Gemini embedding API 每批最多幾個 chunk
+BATCH_SIZE = 5
+# 每批之間等待秒數（避免 429 Rate Limit）
+BATCH_SLEEP = 1.5
+# PDF 單頁萃取字元上限
+PDF_MAX_CHARS_PER_PAGE = 3000
+# Excel 單格字串長度上限
+XLSX_MAX_CELL_LEN = 500
+
+
+# ── 文字萃取函數 ──────────────────────────────────────────────────────────────
+
+def extract_md_text(fpath: str) -> str:
+    """讀取 Markdown 純文字內容"""
+    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def extract_pdf_text(fpath: str) -> str:
+    """使用 pypdf 逐頁萃取 PDF 純文字"""
+    if not PDF_SUPPORT:
+        return ""
+    try:
+        reader = PdfReader(fpath)
+        pages_text = []
+        for page_num, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text() or ""
+                pages_text.append(page_text[:PDF_MAX_CHARS_PER_PAGE])
+            except Exception as e:
+                print(f"[VectorDB] PDF 第 {page_num + 1} 頁萃取失敗，略過：{e}")
+        return "\n\n".join(pages_text)
+    except Exception as e:
+        print(f"[VectorDB] 無法解析 PDF {fpath}：{e}")
+        return ""
+
+
+def extract_docx_text(fpath: str) -> str:
+    """使用 python-docx 萃取 Word 所有段落文字"""
+    if not DOCX_SUPPORT:
+        return ""
+    try:
+        doc = docx_module.Document(fpath)
+        paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+        # 同時萃取表格內容
+        table_rows = []
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    table_rows.append(" | ".join(cells))
+        all_parts = paragraphs + table_rows
+        return "\n".join(all_parts)
+    except Exception as e:
+        print(f"[VectorDB] 無法解析 DOCX {fpath}：{e}")
+        return ""
+
+
+def extract_xlsx_text(fpath: str) -> str:
+    """
+    使用 openpyxl 逐工作表、逐行讀取 Excel。
+    每行各欄用逗號隔開，以保留表格語意關聯。
+    """
+    if not XLSX_SUPPORT:
+        return ""
+    try:
+        wb = openpyxl.load_workbook(fpath, read_only=True, data_only=True)
+        sheets_text = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            rows_text = []
+            for row in ws.iter_rows(values_only=True):
+                cells = []
+                for cell in row:
+                    if cell is None:
+                        continue
+                    cell_str = str(cell).strip()[:XLSX_MAX_CELL_LEN]
+                    if cell_str:
+                        cells.append(cell_str)
+                if cells:
+                    rows_text.append(", ".join(cells))
+            if rows_text:
+                sheets_text.append(f"[工作表：{sheet_name}]\n" + "\n".join(rows_text))
+        wb.close()
+        return "\n\n".join(sheets_text)
+    except Exception as e:
+        print(f"[VectorDB] 無法解析 XLSX {fpath}：{e}")
+        return ""
+
+
+def extract_pptx_text(fpath: str) -> str:
+    """使用 python-pptx 逐投影片、逐形狀萃取文字框純文字"""
+    if not PPTX_SUPPORT:
+        return ""
+    try:
+        prs = PptxPresentation(fpath)
+        slides_text = []
+        for slide_num, slide in enumerate(prs.slides, start=1):
+            slide_parts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = para.text.strip()
+                        if line:
+                            slide_parts.append(line)
+            if slide_parts:
+                slides_text.append(f"[第 {slide_num} 張投影片]\n" + "\n".join(slide_parts))
+        return "\n\n".join(slides_text)
+    except Exception as e:
+        print(f"[VectorDB] 無法解析 PPTX {fpath}：{e}")
+        return ""
+
+
+# ── 核心工具函數 ──────────────────────────────────────────────────────────────
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """將長文字切割成帶重疊的小塊"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start = end - overlap
+        if start >= len(text):
+            break
+    return chunks
+
+
+def get_file_id(fpath: str) -> str:
+    """用絕對路徑的 MD5 作為 ChromaDB 文件 ID 前綴"""
+    return hashlib.md5(fpath.encode("utf-8")).hexdigest()
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """
+    批次呼叫 Gemini gemini-embedding-001 取得向量。
+    遇到錯誤自動重試最多 3 次。
+    """
+    embeddings = []
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i:i + BATCH_SIZE]
+        for attempt in range(3):
+            try:
+                results = [
+                    client.models.embed_content(
+                        model="gemini-embedding-001",
+                        contents=text,
+                        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
+                    ).embeddings[0].values
+                    for text in batch
+                ]
+                embeddings.extend(results)
+                break
+            except Exception as e:
+                print(f"[embed] 第 {attempt + 1} 次失敗：{e}")
+                if attempt < 2:
+                    time.sleep(20)
+                else:
+                    print(f"[embed] 全部重試失敗，填入零向量（{len(batch)} 個）")
+                    embeddings.extend([[0.0] * 768] * len(batch))
+        time.sleep(BATCH_SLEEP)
+    return embeddings
+
+
+def index_file(fpath: str, rel_path: str, mtime_str: str,
+               collection, existing: dict,
+               added_ref: list, updated_ref: list):
+    """
+    對單一檔案執行：萃取文字 → 分塊 → 向量化 → 存入 ChromaDB。
+    支援 .md / .pdf / .docx / .xlsx。
+    """
+    ext = os.path.splitext(fpath)[1].lower()
+
+    # 依副檔名選擇萃取方式
+    if ext == ".md":
+        content = extract_md_text(fpath)
+    elif ext == ".pdf":
+        content = extract_pdf_text(fpath)
+    elif ext == ".docx":
+        content = extract_docx_text(fpath)
+    elif ext == ".xlsx":
+        content = extract_xlsx_text(fpath)
+    elif ext == ".pptx":
+        content = extract_pptx_text(fpath)
+    else:
+        return
+
+    if not content.strip():
+        print(f"[VectorDB] ⚠️  內容為空，略過：{rel_path}")
+        return
+
+    # 若已有舊索引，先刪除
+    if rel_path in existing:
+        try:
+            old_items = collection.get(where={"source": rel_path}, include=["ids"])
+            if old_items["ids"]:
+                collection.delete(ids=old_items["ids"])
+        except Exception as e:
+            print(f"[VectorDB] 刪除舊索引失敗 {rel_path}：{e}")
+
+    # 分塊 → 向量化 → 存入
+    chunks = chunk_text(content)
+    embeddings = embed_texts(chunks)
+
+    file_prefix = get_file_id(fpath)
+    ids = [f"{file_prefix}_{i}" for i in range(len(chunks))]
+    metadatas = [
+        {
+            "source": rel_path,
+            "mtime": mtime_str,
+            "file_type": ext.lstrip("."),
+            "chunk_index": i,
+            "total_chunks": len(chunks),
+        }
+        for i in range(len(chunks))
+    ]
+
+    collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+
+    if rel_path in existing:
+        updated_ref[0] += 1
+        print(f"[VectorDB] ✏️  更新：{rel_path}（{len(chunks)} chunks）")
+    else:
+        added_ref[0] += 1
+        print(f"[VectorDB] ➕ 新增：{rel_path}（{len(chunks)} chunks）")
+
+
+# ── 主程式 ────────────────────────────────────────────────────────────────────
+
+def build_vector_db():
+    print(f"[VectorDB] 開始建立/更新向量資料庫，目標 Vault：{OBSIDIAN_VAULT_PATH}")
+    if not os.path.isdir(OBSIDIAN_VAULT_PATH):
+        print(f"[VectorDB] 找不到 Vault 路徑，退出")
+        return
+
+    # 初始化 ChromaDB
+    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"}
+    )
+
+    # 取得目前 DB 中已存的 mtime 快照
+    existing = {}
+    try:
+        all_items = collection.get(include=["metadatas"])
+        for meta in all_items["metadatas"]:
+            if meta and "source" in meta and "mtime" in meta:
+                existing[meta["source"]] = meta["mtime"]
+    except Exception as e:
+        print(f"[VectorDB] 讀取現有索引失敗：{e}")
+
+    print(f"[VectorDB] 現有索引來源數：{len(existing)}")
+
+    # 決定要掃描哪些副檔名
+    SUPPORTED_EXT = {".md"}
+    if PDF_SUPPORT:
+        SUPPORTED_EXT.add(".pdf")
+    if DOCX_SUPPORT:
+        SUPPORTED_EXT.add(".docx")
+    if XLSX_SUPPORT:
+        SUPPORTED_EXT.add(".xlsx")
+    if PPTX_SUPPORT:
+        SUPPORTED_EXT.add(".pptx")
+
+    print(f"[VectorDB] 支援的檔案類型：{', '.join(sorted(SUPPORTED_EXT))}")
+
+    # 掃描所有支援的檔案
+    all_files = []
+    for root, _, files in os.walk(OBSIDIAN_VAULT_PATH):
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SUPPORTED_EXT:
+                all_files.append(os.path.join(root, fname))
+
+    # 統計各類型數量
+    counts = {}
+    for f in all_files:
+        ext = os.path.splitext(f)[1].lower()
+        counts[ext] = counts.get(ext, 0) + 1
+    count_str = "、".join(f"{ext}×{n}" for ext, n in sorted(counts.items()))
+    print(f"[VectorDB] 找到 {len(all_files)} 個檔案（{count_str}）")
+
+    added_ref = [0]
+    updated_ref = [0]
+    skipped = 0
+
+    for fpath in all_files:
+        try:
+            mtime = os.path.getmtime(fpath)
+            mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+            rel_path = os.path.relpath(fpath, OBSIDIAN_VAULT_PATH)
+
+            # 增量更新：mtime 未變則跳過
+            if rel_path in existing and existing[rel_path] == mtime_str:
+                skipped += 1
+                continue
+
+            index_file(fpath, rel_path, mtime_str, collection, existing,
+                       added_ref, updated_ref)
+
+        except Exception as e:
+            print(f"[VectorDB] 處理失敗 {fpath}：{e}")
+
+    print(f"\n[VectorDB] 完成！新增 {added_ref[0]} | 更新 {updated_ref[0]} | 跳過（未變動） {skipped}")
+    print(f"[VectorDB] ChromaDB 存放路徑：{CHROMA_DB_PATH}")
+
+
+if __name__ == "__main__":
+    build_vector_db()
