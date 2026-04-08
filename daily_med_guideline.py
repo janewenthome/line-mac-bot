@@ -67,35 +67,42 @@ def extract_pdf_text(pdf_path: str, max_pages: int = 50) -> str:
     return "\n".join(text_chunks)
 
 
-def load_memory() -> set[str]:
-    """Load previously processed topics from memory file."""
-    if not os.path.exists(MEMORY_FILE):
-        return set()
-    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f if line.strip())
+def get_existing_topics() -> list[str]:
+    """掃描輸出目錄，從檔名中提取已產生的主題清單（最省 token 的比對方式）。"""
+    topics = []
+    for root, _, files in os.walk(OUT_DIR):
+        for f in files:
+            if f.endswith(".md") and "_" in f:
+                # 檔名格式: 2026-03-25_BPH指南.md → 提取 "BPH指南"
+                topic = f.rsplit(".", 1)[0].split("_", 1)[-1]
+                if topic:
+                    topics.append(topic)
+    return topics
 
 
-def save_memory(topic: str):
-    """Save processed topic to memory file."""
-    with open(MEMORY_FILE, "a", encoding="utf-8") as f:
-        f.write(topic + "\n")
-
-
-def generate_topic_name(pdf_text: str, filename: str) -> str:
-    """Prompt Gemini to extract a suitable topic/title from the document."""
-    prompt = f"Based on the following document excerpt (Filename: {filename}), please suggest a short, concise topic name (under 15 characters if possible, Chinese preferred). Return ONLY the exact topic name, without any other text or punctuation.\n\nExcerpt:\n{pdf_text[:2000]}"
+def generate_topic_name(pdf_text: str, filename: str, existing_topics: list[str]) -> str:
+    """Prompt Gemini to extract a suitable topic/title from the document, avoiding duplicates."""
+    existing_str = "、".join(existing_topics) if existing_topics else "（目前無已產生主題）"
+    prompt = (
+        f"Based on the following document excerpt (Filename: {filename}), "
+        f"please suggest a short, concise topic name (under 15 characters if possible, Chinese preferred).\n"
+        f"Return ONLY the exact topic name, without any other text or punctuation.\n\n"
+        f"⚠️ The following topics have ALREADY been generated, please suggest a DIFFERENT topic:\n"
+        f"{existing_str}\n\n"
+        f"Excerpt:\n{pdf_text[:2000]}"
+    )
     try:
-        # Use simple generate for topic
         resp = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt
             )
-        
-        # Ensure we have a string to strip
         if not resp.text:
             return filename.replace(".pdf", "").replace("/", "-")[0:15]
-            
-        return str(resp.text).strip().replace("/", "-")
+        topic = str(resp.text).strip().replace("/", "-")
+        # 最終防護：如果 Gemini 仍回傳重複主題，加上檔名前綴區分
+        if topic in existing_topics:
+            topic = f"{topic}_{filename[:8]}"
+        return topic
     except Exception as e:
         print(f"Failed to generate topic name: {e}")
         return filename.replace(".pdf", "").replace("/", "-")[0:15]
@@ -114,51 +121,43 @@ def run_daily_guideline():
     with open(SKILL_FILE, "r", encoding="utf-8") as f:
         system_instruction = f.read()
 
-    # 2. Get PDFs and setup memory
-    pdfs = get_all_pdfs(PDF_DIR)
-    if not pdfs:
+    # 2. Get PDFs
+    all_pdfs = get_all_pdfs(PDF_DIR)
+    if not all_pdfs:
         print(f"[Guideline] No PDFs found in {PDF_DIR}")
         return
-        
-    processed_topics = load_memory()
-    MAX_ATTEMPTS = 5
-    
-    selected_pdf = None
-    topic_name = ""
-    pdf_text = ""
-    
-    # 3. Random selection loop matching memory file
-    for attempt in range(MAX_ATTEMPTS):
-        candidate_pdf = random.choice(pdfs)
-        filename = os.path.basename(candidate_pdf)
-        print(f"[Guideline] Attempt {attempt+1}: Checking {filename}")
-        
-        extracted_text = extract_pdf_text(candidate_pdf)
-        if not extracted_text:
-            continue
-            
-        candidate_topic = generate_topic_name(extracted_text, filename)
-        if candidate_topic in processed_topics:
-            print(f"[Guideline] Topic '{candidate_topic}' already processed. Retrying...")
-            continue
-            
-        # Found completely new topic
-        selected_pdf = candidate_pdf
-        topic_name = candidate_topic
-        pdf_text = str(extracted_text)
-        break
-        
-    if not selected_pdf:
-        print("[Guideline] Exhausted attempts. All sampled PDFs were already processed or unreadable.")
+
+    # 3. 取得已產生的主題清單（從輸出目錄檔名解析，零 API 成本）
+    existing_topics = get_existing_topics()
+    print(f"[Guideline] 已有 {len(existing_topics)} 個主題: {existing_topics}")
+
+    # 4. 隨機抽取一篇 PDF（所有 PDF 都可被重複使用，只要主題不重複）
+    random.shuffle(all_pdfs)
+    selected_pdf = all_pdfs[0]
+    filename = os.path.basename(selected_pdf)
+    print(f"[Guideline] Selected PDF: {filename}")
+
+    # 擷取文字
+    pdf_text = str(extract_pdf_text(selected_pdf))
+    if not pdf_text.strip():
+        print(f"[Guideline] Failed to extract text or PDF is empty: {filename}")
         return
 
-    print(f"[Guideline] Selected '{topic_name}' from {os.path.basename(selected_pdf)}")
+    # 產生主題名稱（Gemini 只需多看幾個已有主題字串，token 成本極低）
+    topic_name = generate_topic_name(pdf_text, filename, existing_topics)
+    print(f"[Guideline] Generated Topic: '{topic_name}'")
 
-    # 4. Generate Guide Note
+    # 最終主題重複檢查
+    if topic_name in existing_topics:
+        print(f"[Guideline] Topic '{topic_name}' already exists, skipping.")
+        return
+
+    # 5. Generate Guide Note
     prompt = (
-        f"文件來源：{os.path.basename(selected_pdf)}\n"
+        f"文件名稱：{filename}\n"
+        f"文件位置：{selected_pdf}\n"
         f"以下是擷取的部分文件內容，請依據 system_instruction 的規則為我撰寫導讀筆記：\n\n"
-        f"{pdf_text[0:15000]}" # Limit context window just to be safe, ~15k chars is reasonable for quick summary
+        f"{pdf_text[0:15000]}"
     )
 
     try:
@@ -171,7 +170,7 @@ def run_daily_guideline():
         print(f"[Guideline] Failed to generate note: {e}")
         return
 
-    # 5. Save to Obsidian
+    # 6. Save to Obsidian
     now = datetime.now()
     year_str = now.strftime("%Y")
     month_str = now.strftime("%m")
@@ -190,11 +189,7 @@ def run_daily_guideline():
         print(f"[Guideline] Failed to save note: {e}")
         return
 
-    # 6. Record to memory
-    if topic_name:
-        save_memory(topic_name)
-    print(f"[Guideline] Successfully recorded '{topic_name}' to memory. Done!")
-
+    print(f"[Guideline] Successfully generated '{topic_name}' from '{filename}'. Done!")
 
 if __name__ == "__main__":
     run_daily_guideline()

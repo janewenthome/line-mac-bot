@@ -24,7 +24,7 @@ INCLUDE_EXTENSIONS = {
 SKIP_DIRS = {
     "venv", ".venv", "env", "__pycache__", ".git", ".idea",
     "node_modules", ".mypy_cache", ".pytest_cache", "dist", "build",
-    ".DS_Store",
+    ".DS_Store", "worldmonitor_repo", "worldmonitor"
 }
 
 # 略過這些副檔名（二進位 / 媒體）

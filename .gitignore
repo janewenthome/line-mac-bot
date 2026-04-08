@@ -1,8 +1,34 @@
+# Environments and Secrets
 .venv/
-chroma_db/
-playwright_profile/
-__pycache__/
 .env
+.claude/
+.threads_token.json
+
+# Database and Cache
+chroma_db/
+__pycache__/
+
+# Dependencies / Third-party
+playwright_profile/
+
+# Media
 *.m4a
 *.pdf
+
+# System
 .DS_Store
+
+# Logs
+*.log
+
+# Backups
+*.bak*
+*_backup.py
+app_backup_v3.py
+
+# User Local Data
+Obsidian_Inbox/
+Line_Photo/
+inbox.txt
+processed_guidelines.txt
+pixnet_urls.txt

@@ -248,7 +248,17 @@ def sync_gmail():
     skipped = 0
 
     try:
-        imap.select("INBOX")
+        # 動態尋找「所有郵件」資料夾（支援多國語言）
+        status, folders = imap.list()
+        all_mail_folder = '"INBOX"'
+        for f in folders:
+            f_str = f.decode("utf-8")
+            if "\\All" in f_str:
+                all_mail_folder = f_str.split(' "/" ')[-1]
+                break
+        
+        print(f"[Gmail] 選擇資料夾：{all_mail_folder}")
+        imap.select(all_mail_folder)
 
         for sender in TARGET_SENDERS:
             print(f"\n[Gmail] 搜尋寄件者：{sender}")

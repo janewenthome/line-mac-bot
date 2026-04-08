@@ -4,6 +4,7 @@ LINE Mac Bot - 透過 LINE 訊息遠端操控 Mac Mini
 新增：AI 自動分類筆記 + APScheduler 週五煉金
 """
 import os
+import sys
 import subprocess
 import time
 import random
@@ -1062,7 +1063,140 @@ def send_line_reply(reply_token: str, text: str):
         )
 
 
+# ── 背景 Threads 發布（供「脆發文」指令呼叫）────────────────────────────────
+
+def _publish_threads_background():
+    """背景執行 Threads 發布，結果記錄在 terminal log 和 Obsidian，不佔用 LINE 推播額度。"""
+    try:
+        from daily_news_digest import publish_threads_from_obsidian
+        result = publish_threads_from_obsidian()
+        print(f"[脆發文] 背景發布結果：{result}")
+    except Exception as e:
+        print(f"[錯誤][脆發文] 背景發布失敗：{e}")
+
+
+def _generate_news_background():
+    """背景執行新聞摘要產生（不推播，純 Obsidian 存檔）。"""
+    try:
+        from daily_news_digest import generate_digest
+        generate_digest()
+        print("[新聞摘要] 背景產生完成")
+    except Exception as e:
+        print(f"[錯誤][新聞摘要] 背景產生失敗：{e}")
+
+
+def _generate_meditation_background():
+    """背景執行早晨冥想（不推播，純 Obsidian 存檔）。"""
+    try:
+        morning_meditation_job()
+        print("[冥想] 背景產生完成")
+    except Exception as e:
+        print(f"[錯誤][冥想] 背景產生失敗：{e}")
+
+
+def _generate_pickleball_background(user_id=None):
+    """背景執行匹克球與健走醫學文獻監控（純 Obsidian 存檔並回傳狀態）。"""
+    import subprocess
+    try:
+        # 使用 Pickleball 專案專屬的虛擬環境執行
+        cmd = ["/Volumes/2TB/program/Pickleball/.venv/bin/python3", "main.py"]
+        result = subprocess.run(
+            cmd,
+            cwd="/Volumes/2TB/program/Pickleball",
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        print("[匹克球] 醫學文獻監控完成")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"[錯誤][匹克球] 醫學文獻監控失敗：{e.stderr}")
+    except Exception as e:
+        print(f"[錯誤][匹克球] 啟觸失敗：{e}")
+
+
+def _run_build_wiki(force=False):
+    """背景執行掃描文章產出 Wiki"""
+    import subprocess
+    try:
+        cmd = ["/Users/wenhung/book translate/.venv/bin/python3", "-u", "/Users/wenhung/book translate/build_wiki.py"]
+        if force:
+            cmd.append("--force")
+        with open("/tmp/wiki_scan.log", "w", encoding="utf-8") as f:
+            subprocess.run(cmd, cwd="/Users/wenhung/book translate", stdout=f, stderr=subprocess.STDOUT, check=True)
+        print("[維基掃描] 背景執行完成")
+    except Exception as e:
+        print(f"[錯誤][維基掃描] 啟動失敗: {e}")
+
+def _stop_build_wiki():
+    """強制停止正在背景執行的掃描爬蟲程式"""
+    import subprocess
+    try:
+        # pkill 會透過給定文字名稱中止程序
+        subprocess.run(["pkill", "-f", "build_wiki.py"], check=True)
+        print("[維基掃描] 已強制中止程序")
+    except subprocess.CalledProcessError:
+        print("[維基掃描] 沒有發現正在執行的程序可以中止")
+    except Exception as e:
+        print(f"[錯誤][維基掃描] 強制中止失敗: {e}")
+
+def _query_wiki_background(user_message):
+    """背景讀取整個 Wiki 並請求 Gemini 取得洞見，只存檔不推播"""
+    try:
+        import os
+        from datetime import datetime
+        # Load configuration
+        config_path = "/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain/系統設定/SKILL_私人維基建置設定.md"
+        query_model = "gemini-2.5-flash"
+        if os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                for line in f.read().split("\n"):
+                    if line.startswith("query_model:"):
+                        query_model = line.split(":", 1)[1].strip()
+        
+        wiki_dir = "/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain/文章存檔/Wiki"
+        megaprompt_parts = []
+        if os.path.isdir(wiki_dir):
+            for fname in os.listdir(wiki_dir):
+                if fname.endswith(".md") and fname != "000_維基總目錄.md":
+                    try:
+                        with open(os.path.join(wiki_dir, fname), "r", encoding="utf-8") as f:
+                            content = f.read()
+                        megaprompt_parts.append(f"### 📄 參考資料：{fname}\n{content}\n")
+                    except:
+                        pass
+        context_str = "\n".join(megaprompt_parts)
+        
+        prompt = (
+            "你是一個超群的個人專屬知識庫分析總監。請「只」使用以下隨附的全部私人維基筆記當作唯一事實來源，來解答使用者的問題。\n"
+            "如果有找到答案，請總結並引用檔案名稱。如果資料庫內沒有，請誠實說沒有，不要自己腦補。\n"
+            "請將重點歸納成一份排版精美的深度分析 Markdown 文件。\n\n"
+            f"【使用者問題】\n{user_message}\n\n"
+            f"【私人維基文字全庫】\n{context_str}"
+        )
+        
+        ans = safe_generate(prompt, model_name=query_model)
+        
+        # Save to ~/Library/.../文章存檔/1. 反思/YYYY/MM
+        now = datetime.now()
+        out_dir = f"/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain/文章存檔/1. 反思/{now.strftime('%Y')}/{now.strftime('%m')}"
+        os.makedirs(out_dir, exist_ok=True)
+        # 清理檔名可能的不可見字元
+        safe_msg = "".join(c for c in user_message[:15] if c.isalnum() or c in (" ", "_", "-")).strip()
+        if not safe_msg: safe_msg = "檢索結果"
+        filename = f"{now.strftime('%Y-%m-%d_%H%M')}_{safe_msg}.md"
+        out_path = os.path.join(out_dir, filename)
+        
+        content = f"---\ntags: [大腦檢索, {query_model}]\nquestion: '{user_message}'\ndate: {now.strftime('%Y-%m-%d %H:%M')}\n---\n# {user_message}\n\n{ans}"
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[維基檢索] 已完成並存檔至: {out_path}")
+        
+    except Exception as e:
+        print(f"[錯誤][維基檢索] 失敗: {e}")
+
 # ── Flask Routes ─────────────────────────────────────────────────────────────
+
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -1122,8 +1256,37 @@ def on_message(event):
     # ── 嚴格三岔路口：以標點符號判斷訊息類型 ─────────────────────────────────
     text = user_text.strip()
 
-    if text.endswith(("?", "？")):
-        # ── 大腦問答模式 ──
+    # 提早攔截進度查詢，避免被標點符號（例如問號）誤判為發問
+    import unicodedata
+    raw_clean = "".join(ch for ch in text if not unicodedata.category(ch).startswith(("Z", "C")) or ch == " ")
+    raw_clean = raw_clean.strip("!！❕?？.，, ").replace("line詢問，", "").strip()
+    if raw_clean in ["掃描進度", "進度", "查看進度"]:
+        try:
+            import os
+            if not os.path.exists("/tmp/wiki_scan.log"):
+                reply_msg = "目前沒有產生任何進度日誌喔！或者掃描已經結束。"
+            else:
+                with open("/tmp/wiki_scan.log", "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    if not lines:
+                        reply_msg = "目前沒有產生任何進度日誌喔！"
+                    else:
+                        last_lines = "".join(lines[-15:])
+                        reply_msg = f"🔍 最新掃描進度：\n\n{last_lines}"
+            send_line_reply(event.reply_token, reply_msg)
+        except Exception as e:
+            send_line_reply(event.reply_token, f"無法讀取掃描進度：{e}")
+        return
+
+    if text.lower().endswith(("wiki?", "wiki？")):
+        # ── 全庫維基超級檢索 (Long Context) ──
+        clean_text = text[:-5].strip()
+        send_line_reply(event.reply_token, "✅ 已啟動維基大腦全局檢索，結果將彙整至筆記本【1. 反思】中。")
+        executor.submit(_query_wiki_background, clean_text)
+        return
+
+    elif text.endswith(("?", "？")):
+        # ── 原本的大腦問答模式 (ChromaDB Vector Search) ──
         try:
             notes_context = search_obsidian(text)
             reply_text = answer_with_obsidian(text, notes_context)
@@ -1131,9 +1294,51 @@ def on_message(event):
             reply_text = "老闆，查詢筆記時發生錯誤，請稍後再試！"
             print(f"[錯誤][問答] {e}")
 
-    elif text.endswith(("!", "！")):
+    elif text.endswith(("!", "！", "❕")):
         # ── Mac 控制模式：移除句尾驚嘆號再送給 Gemini ──
-        cmd_text = text.rstrip("!！")
+        cmd_text = text.rstrip("!！❕")
+
+        # 攔截特殊指令：脆發文 / 新聞 / 冥想
+        # 使用 strip + 正規化移除可能的不可見 Unicode 字元
+        import unicodedata
+        cmd_clean = "".join(ch for ch in cmd_text if not unicodedata.category(ch).startswith(("Z", "C")) or ch == " ").strip()
+        print(f"[DEBUG][指令] cmd_clean='{cmd_clean}'")
+
+        if cmd_clean == "脆發文":
+            send_line_reply(event.reply_token, "📤 發文中...")
+            executor.submit(_publish_threads_background)
+            return
+
+        if cmd_clean == "新聞":
+            send_line_reply(event.reply_token, "📰 製作新聞中...")
+            executor.submit(_generate_news_background)
+            return
+
+        if cmd_clean == "冥想":
+            send_line_reply(event.reply_token, "🧘 冥想生成中...")
+            executor.submit(_generate_meditation_background)
+            return
+
+        if cmd_clean == "匹克球":
+            send_line_reply(event.reply_token, "🏓 匹克球與健走文獻監控啟動中...")
+            executor.submit(_generate_pickleball_background, event.source.user_id)
+            return
+
+        if cmd_clean == "停止掃描文件":
+            send_line_reply(event.reply_token, "🛑 正在強制煞車，中止當前的知識庫爬蟲與文件掃描...")
+            executor.submit(_stop_build_wiki)
+            return
+
+        if cmd_clean == "重新掃描文件":
+            send_line_reply(event.reply_token, "🧹 收到強制重置指令。將無視舊紀錄，開始重新掃描所有來源檔案重建維基，請稍候。")
+            executor.submit(_run_build_wiki, force=True)
+            return
+
+        if cmd_clean in ["掃描文件", "掃描文章"]:
+            send_line_reply(event.reply_token, "✅ 知識庫爬蟲起動中，將會開始依照資料夾建立鏡像維基，請稍候查看 Obsidian 維基目錄刷新。")
+            executor.submit(_run_build_wiki)
+            return
+
         try:
             reply_text = process_with_gemini(cmd_text) or "老闆，目前 API 額度塞車中，請稍後再試！"
         except Exception as e:
@@ -1379,15 +1584,15 @@ scheduler.add_job(
     misfire_grace_time=3600,
     id="weekly_summary_job"
 )
-scheduler.add_job(
-    morning_meditation_job,
-    trigger="cron",
-    day_of_week="mon-fri",
-    hour=8,
-    minute=30,
-    misfire_grace_time=3600,
-    id="morning_meditation_job"
-)
+# scheduler.add_job(  # ── 改為 LINE「冥想！」手動觸發 ──
+#     morning_meditation_job,
+#     trigger="cron",
+#     day_of_week="mon-fri",
+#     hour=8,
+#     minute=30,
+#     misfire_grace_time=3600,
+#     id="morning_meditation_job"
+# )
 
 
 def run_build_vector_db():
@@ -1487,24 +1692,28 @@ scheduler.add_job(
 
 def run_daily_guideline_job():
     """在背景執行 daily_med_guideline.py（週一至週五 10:00）"""
+    import logging
+    log = logging.getLogger(__name__)
     script_path = os.path.join(BASE_DIR, "daily_med_guideline.py")
     if not os.path.isfile(script_path):
-        print(f"[指引新知] 找不到 {script_path}，略過")
+        log.warning(f"[指引新知] 找不到 {script_path}，略過")
         return
     try:
         result = subprocess.run(
             [os.path.join(BASE_DIR, ".venv", "bin", "python"), script_path],
             capture_output=True, text=True, timeout=600
         )
-        print(f"[指引新知] 執行完畢（exit={result.returncode}）")
+        log.info(f"[指引新知] 執行完畢（exit={result.returncode}）")
         if result.stdout:
-            print(f"[指引新知] stdout: {result.stdout[-500:]}")
+            log.info(f"[指引新知] stdout: {result.stdout[-500:]}")
         if result.stderr:
-            print(f"[指引新知] stderr: {result.stderr[-200:]}")
+            log.warning(f"[指引新知] stderr: {result.stderr[-500:]}")
+        if result.returncode != 0:
+            log.error(f"[指引新知] 非零退出碼: {result.returncode}")
     except subprocess.TimeoutExpired:
-        print("[指引新知] 執行逾時（10分鐘）")
+        log.error("[指引新知] 執行逾時（10分鐘）")
     except Exception as e:
-        print(f"[指引新知] 執行失敗：{e}")
+        log.error(f"[指引新知] 執行失敗：{e}")
 
 
 scheduler.add_job(
@@ -1519,9 +1728,8 @@ scheduler.add_job(
 
 scheduler.start()
 print("[排程] APScheduler 已啟動，每天 11:00（台北）自動每日碎語歸納")
-print("[排程] APScheduler 已啟動，每天 20:00（台北）晨報預抓（隔日早安資料）")
+print("[排程] 冥想/新聞改為 LINE 手動觸發（已停用排程）")
 print("[排程] APScheduler 已啟動，每週五 13:00（台北）每週總結")
-print("[排程] APScheduler 已啟動，週一至週五 08:30（台北）早晨冥想")
 print("[排程] APScheduler 已啟動，週一至週五 10:00（台北）自動每日醫學指引")
 print("[排程] APScheduler 已啟動，每天 14:00 自動執行 build_vector_db.py")
 print("[排程] APScheduler 已啟動，每 12 小時自動執行 sync_gmail.py")
