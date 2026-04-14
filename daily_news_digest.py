@@ -69,10 +69,15 @@ def _cfg(key: str, default=None):
     return val if val is not None else default
 
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 # ── 不可外部化的設定（敏感/路徑相關）──────────────────────────────────
-GEMINI_API_KEY = os.environ.get(
-    "GEMINI_API_KEY", ""
-)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 
 LOG_FILE = Path(__file__).parent / "daily_news_digest.log"
 CACHE_FILE = Path(__file__).parent / ".digest_cache.json"
@@ -92,13 +97,7 @@ load_config()
 
 # ── 從設定檔取值（附 fallback 預設值）────────────────────────────────
 
-OBSIDIAN_BASE = Path(
-    os.path.expanduser(
-        _cfg("obsidian.output_base",
-             "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
-             "Second brain/文章存檔/4. 每日新聞摘要")
-    )
-)
+OBSIDIAN_BASE = Path(os.path.expanduser(_cfg("obsidian.output_base", "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain/文章存檔/Wiki/最新新聞")))
 
 MAX_ARTICLES_PER_FEED = _cfg("limits.max_articles_per_feed", 8)
 MAX_TOTAL_ARTICLES = _cfg("limits.max_total_articles", 80)
@@ -213,13 +212,70 @@ def save_cache(hashes: set):
     }))
 
 
-def call_gemini(prompt: str) -> Optional[str]:
+
+def call_grok_twitter_insights() -> str:
+    """呼叫 xAI Grok API 搜尋 X(Twitter) 的地緣政治多元視角摘要。"""
+    import urllib.request
+    import urllib.error
+
+    if not XAI_API_KEY:
+        log.warning("XAI_API_KEY 未設定，略過 Grok 搜尋")
+        return "（未取得 Twitter 獨特視角）"
+
+    model = _cfg("grok.model", "grok-3-mini")
+    temperature = _cfg("grok.temperature", 0.3)
+    
+    url = "https://api.x.ai/v1/chat/completions"
+    
+    system_prompt = "You are Grok, an AI developed by xAI. Your strengths include accessing real-time information from X (Twitter) and providing unfiltered, maximally unbiased, and globally diverse perspectives."
+    user_prompt = """請搜尋 X (Twitter) 上過去 24 小時內最具討論度的全球地緣政治事件（例如中東、俄烏、美中台、歐洲局勢）。
+重點任務：
+1. 避開單一西方主流媒體視角。
+2. 收集並彙整來自不同陣營的聲音：例如美國共和黨與民主黨的不同觀點、歐洲各國的反應、中東世界的在地視角、或是中國與印度的戰略評論。
+3. 如果發現有別於常理或反直覺的獨特觀點，請特別點出。
+
+請用台灣繁體中文，整理出約 300-500 字的精要總結。分列各區域的特殊洞見。"""
+
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": temperature,
+    }).encode()
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {XAI_API_KEY}"
+        },
+        method="POST",
+    )
+
+    log.info(f"呼叫 Grok API ({model}) 獲取 Twitter 全球視角...")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if text:
+                log.info("  ✓ Grok API 回應成功")
+                return text
+    except Exception as e:
+        log.error(f"  Grok API 失敗: {e}")
+    
+    return "（本次未能順利取得 Twitter 獨特視角）"
+
+
+def call_gemini(prompt: str, override_models: list[str] = None) -> Optional[str]:
     """呼叫 Gemini API 產生摘要，含 429 重試機制。"""
     import urllib.request
     import urllib.error
     import time
 
-    models = _cfg("gemini.models", ["gemini-2.5-flash", "gemini-2.0-flash-lite"])
+    models = override_models or _cfg("gemini.models", ["gemini-2.5-flash", "gemini-2.0-flash-lite"])
     temperature = _cfg("gemini.temperature", 0.4)
     max_tokens = _cfg("gemini.max_output_tokens", 12288)
 
@@ -275,7 +331,7 @@ def call_gemini(prompt: str) -> Optional[str]:
 
 # ── Obsidian 摘要 Prompt ─────────────────────────────────────────────
 
-def build_prompt(categorized: dict[str, list[dict]]) -> str:
+def build_prompt(categorized: dict[str, list[dict]], grok_twitter_insights: str = '') -> str:
     """將分類新聞組成 Gemini prompt。使用設定檔中的模板。"""
 
     feed_text = ""
@@ -306,7 +362,7 @@ def build_prompt(categorized: dict[str, list[dict]]) -> str:
     # 從設定檔取 prompt 模板，找不到則用內建預設
     template = _cfg("prompt_obsidian")
     if template:
-        return template.replace("{feed_text}", feed_text)
+        return template.replace("{feed_text}", feed_text).replace("{grok_twitter_insights}", grok_twitter_insights)
 
     # fallback: 內建預設 prompt（與 YAML 中相同）
     return f"""你是一位專業的地緣政治與財經分析師 (CFA)，為一位住在台灣的投資者撰寫每日情報摘要。
@@ -504,7 +560,8 @@ def digest_to_threads_posts(digest: str) -> Optional[list[str]]:
 請直接輸出 5 則文字，用 ---THREAD_BREAK--- 分隔。不要加任何前綴説明。
 """
 
-    result = call_gemini(prompt)
+    threads_model = _cfg("threads.model", "gemini-3.1-pro-preview")
+    result = call_gemini(prompt, override_models=[threads_model])
     if not result:
         return None
 
@@ -652,9 +709,10 @@ def generate_digest():
         log.warning("無新聞可擷取，跳過。")
         return
 
-    # 5. 呼叫 Gemini 產生摘要
+    # 5. 呼叫 Grok & Gemini
+    grok_insights = call_grok_twitter_insights()
     log.info("呼叫 Gemini AI 產生繁體中文摘要...")
-    prompt = build_prompt(categorized)
+    prompt = build_prompt(categorized, grok_insights)
     digest = call_gemini(prompt)
 
     if not digest:

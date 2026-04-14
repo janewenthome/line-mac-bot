@@ -15,7 +15,7 @@ OBSIDIAN_VAULT_PATH = "/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidia
 
 PDF_DIR = "/Users/wenhung/Library/Mobile Documents/com~apple~CloudDocs/MacMini/Guideline"
 SKILL_FILE = os.path.join(OBSIDIAN_VAULT_PATH, "系統設定", "SKILL：醫學指引拆解規則.md")
-OUT_DIR = os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "3. 指引新知")
+OUT_DIR = os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "Wiki", "醫學指引新知")
 MEMORY_FILE = os.path.join(BASE_DIR, "processed_guidelines.txt")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -193,3 +193,4 @@ def run_daily_guideline():
 
 if __name__ == "__main__":
     run_daily_guideline()
+

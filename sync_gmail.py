@@ -32,8 +32,8 @@ OBSIDIAN_VAULT_PATH = "/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidia
 med_humanities_folder = os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "醫學人文反思作業")
 
 SENDER_FOLDER_MAP = {
-    "manny@manny-li.com": os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "曼報pro"),
-    "shosho@shosho.tw":   os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "張修修"),
+    "manny@manny-li.com": os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "Wiki", "曼報pro"),
+    "shosho@shosho.tw":   os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "Wiki", "張修修"),
     "wcr12011@gms.tcu.edu.tw": med_humanities_folder,
     "114101120@gms.tcu.edu.tw": med_humanities_folder,
     "114101144@gms.tcu.edu.tw": med_humanities_folder,

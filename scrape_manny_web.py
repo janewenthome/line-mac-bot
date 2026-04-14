@@ -33,7 +33,7 @@ OBSIDIAN_VAULT_PATH = (
     "/Users/wenhung/Library/Mobile Documents/"
     "iCloud~md~obsidian/Documents/Second brain"
 )
-SAVE_DIR = os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "曼報Pro_商業解碼")
+SAVE_DIR = os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "Wiki", "曼報Pro_商業解碼")
 
 # ── 工具函數 ──────────────────────────────────────────────────────────────────
 

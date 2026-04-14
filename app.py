@@ -1617,14 +1617,14 @@ def run_build_vector_db():
         print(f"[向量DB] 執行失敗：{e}")
 
 
-scheduler.add_job(
-    run_build_vector_db,
-    trigger="cron",
-    hour=14,
-    minute=0,
-    misfire_grace_time=3600,
-    id="build_vector_db"
-)
+# scheduler.add_job(  # ── 暫停：向量資料庫改為手動觸發 ──
+#     run_build_vector_db,
+#     trigger="cron",
+#     hour=14,
+#     minute=0,
+#     misfire_grace_time=3600,
+#     id="build_vector_db"
+# )
 
 
 def run_sync_gmail():
@@ -1679,15 +1679,15 @@ def run_weaver():
         print(f"[Weaver排程] 執行失敗：{e}")
 
 
-scheduler.add_job(
-    run_weaver,
-    trigger="cron",
-    day_of_week="mon",
-    hour=13,
-    minute=0,
-    misfire_grace_time=3600,
-    id="weaver_job"
-)
+# scheduler.add_job(  # ── 暫停：weaver 標籤分類改為手動觸發 ──
+#     run_weaver,
+#     trigger="cron",
+#     day_of_week="mon",
+#     hour=13,
+#     minute=0,
+#     misfire_grace_time=3600,
+#     id="weaver_job"
+# )
 
 
 def run_daily_guideline_job():
@@ -1731,9 +1731,9 @@ print("[排程] APScheduler 已啟動，每天 11:00（台北）自動每日碎�
 print("[排程] 冥想/新聞改為 LINE 手動觸發（已停用排程）")
 print("[排程] APScheduler 已啟動，每週五 13:00（台北）每週總結")
 print("[排程] APScheduler 已啟動，週一至週五 10:00（台北）自動每日醫學指引")
-print("[排程] APScheduler 已啟動，每天 14:00 自動執行 build_vector_db.py")
 print("[排程] APScheduler 已啟動，每 12 小時自動執行 sync_gmail.py")
-print("[排程] APScheduler 已啟動，每週一 13:00 自動執行 weaver.py")
+print("[排程] 已暫停：build_vector_db、weaver（改為手動觸發）")
+print("[排程] 已移除 LaunchAgent：daily-news-digest、medical-literature-monitor、move-obsidian-notes")
 
 
 if __name__ == "__main__":

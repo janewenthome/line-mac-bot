@@ -1,8 +1,14 @@
 # Environments and Secrets
 .venv/
 .env
+.env.local
+.env.*.local
 .claude/
 .threads_token.json
+.digest_cache.json
+
+# Wrapper scripts (contain paths that source .env)
+*_wrapper.sh
 
 # Database and Cache
 chroma_db/
@@ -14,6 +20,7 @@ playwright_profile/
 # Media
 *.m4a
 *.pdf
+*.icc
 
 # System
 .DS_Store
@@ -32,3 +39,4 @@ Line_Photo/
 inbox.txt
 processed_guidelines.txt
 pixnet_urls.txt
+
