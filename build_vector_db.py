@@ -26,8 +26,7 @@ except ImportError:
 
 import chromadb
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from chromadb.utils import embedding_functions
 
 
 # ── 選用套件（軟依賴，缺少時優雅降級）────────────────────────────────────────
@@ -62,22 +61,18 @@ except ImportError:
 # ── 環境設定 ─────────────────────────────────────────────────────────────────
 load_dotenv()
 
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-OBSIDIAN_VAULT_PATH = "/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain"
-BASE_DIR = os.path.expanduser("~/line-mac-bot")
-CHROMA_DB_PATH = os.path.join(BASE_DIR, "chroma_db")
+CHROMA_DB_PATH = "/Volumes/2TB/program/vector"
 COLLECTION_NAME = "obsidian_notes"
+OBSIDIAN_VAULT_PATH = os.path.expanduser("~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain")
+
+# 本機模型實例化
+emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
 
 # 每個文件最大 chunk 字元數
 CHUNK_SIZE = 1200
 # 相鄰 chunk 之間的重疊字元數
 CHUNK_OVERLAP = 150
-# Gemini embedding API 每批最多幾個 chunk
-BATCH_SIZE = 5
-# 每批之間等待秒數（避免 429 Rate Limit）
-BATCH_SLEEP = 1.5
+# (Google GenAI embedding parameters removed)
 # PDF 單頁萃取字元上限
 PDF_MAX_CHARS_PER_PAGE = 3000
 # Excel 單格字串長度上限
@@ -207,35 +202,7 @@ def get_file_id(fpath: str) -> str:
     return hashlib.md5(fpath.encode("utf-8")).hexdigest()
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """
-    批次呼叫 Gemini gemini-embedding-001 取得向量。
-    遇到錯誤自動重試最多 3 次。
-    """
-    embeddings = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i:i + BATCH_SIZE]
-        for attempt in range(3):
-            try:
-                results = [
-                    client.models.embed_content(
-                        model="gemini-embedding-001",
-                        contents=text,
-                        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
-                    ).embeddings[0].values
-                    for text in batch
-                ]
-                embeddings.extend(results)
-                break
-            except Exception as e:
-                print(f"[embed] 第 {attempt + 1} 次失敗：{e}")
-                if attempt < 2:
-                    time.sleep(20)
-                else:
-                    print(f"[embed] 全部重試失敗，填入零向量（{len(batch)} 個）")
-                    embeddings.extend([[0.0] * 768] * len(batch))
-        time.sleep(BATCH_SLEEP)
-    return embeddings
+# (embed_texts function removed, replaced by ChromaDB native)
 
 
 # ── 日期萃取輔助函數 ──────────────────────────────────────────────────────────
@@ -331,9 +298,7 @@ def index_file(fpath: str, rel_path: str, mtime_str: str,
         except Exception as e:
             print(f"[VectorDB] 刪除舊索引失敗 {rel_path}：{e}")
 
-    # 分塊 → 向量化 → 存入
     chunks = chunk_text(content)
-    embeddings = embed_texts(chunks)
 
     file_prefix = get_file_id(fpath)
     ids = [f"{file_prefix}_{i}" for i in range(len(chunks))]
@@ -350,7 +315,7 @@ def index_file(fpath: str, rel_path: str, mtime_str: str,
         for i in range(len(chunks))
     ]
 
-    collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+    collection.add(ids=ids, documents=chunks, metadatas=metadatas)
 
     if rel_path in existing:
         updated_ref[0] += 1
@@ -372,6 +337,7 @@ def build_vector_db():
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
     collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
+        embedding_function=emb_fn,
         metadata={"hnsw:space": "cosine"}
     )
 

@@ -24,24 +24,27 @@ os.environ["CHROMA_TELEMETRY"]    = "False"
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 import chromadb
-from google import genai
-from google.genai import types
+from chromadb.utils import embedding_functions
+from openai import OpenAI
 import streamlit as st
 from dotenv import load_dotenv
 
 # ── 環境設定 ──────────────────────────────────────────────────────────────────
 load_dotenv()
 
-GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY  = os.environ.get("OPENROUTER_API_KEY", "")
 OBSIDIAN_VAULT_PATH = (
     "/Users/wenhung/Library/Mobile Documents/"
     "iCloud~md~obsidian/Documents/Second brain"
 )
 BASE_DIR    = os.path.expanduser("~/line-mac-bot")
-CHROMA_PATH = os.path.join(BASE_DIR, "chroma_db")
+CHROMA_PATH = "/Volumes/2TB/program/vector"
 MAX_HISTORY = 10
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY
+)
 
 # 混合搜尋：需要關鍵字加成的詞彙
 KEYWORD_BOOST_TERMS = [
@@ -270,14 +273,7 @@ def get_collection_count() -> int:
         return 0
 
 
-def _embed_query(query: str) -> list[float]:
-    """向量化查詢文字"""
-    resp = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=query,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
-    )
-    return resp.embeddings[0].values
+# _embed_query 移除，改由 ChromaDB 原生處理
 
 
 def _date_cutoff_str(range_label: str) -> Optional[str]:
@@ -322,9 +318,8 @@ def hybrid_search(
 
     try:
         db  = chromadb.PersistentClient(path=CHROMA_PATH)
-        col = db.get_or_create_collection("obsidian_notes")
-
-        query_embedding = _embed_query(query)
+        emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
+        col = db.get_or_create_collection("obsidian_notes", embedding_function=emb_fn)
 
         # 建立 ChromaDB where 過濾條件（日期）
         where_filter = None
@@ -332,7 +327,7 @@ def hybrid_search(
             where_filter = {"note_date": {"$gte": date_cutoff}}
 
         results = col.query(
-            query_embeddings=[query_embedding],
+            query_texts=[query],
             n_results=min(n_results, col.count() or 1),
             include=["documents", "metadatas"],
             where=where_filter if where_filter else None,
@@ -379,12 +374,15 @@ def hybrid_search(
     return "\n\n---\n\n".join(parts), sources
 
 
-def _call_gemini(prompt: str, model: str = "gemini-2.5-flash") -> str:
-    """呼叫 Gemini，最多重試 3 次"""
+def _call_gemini(prompt: str, model: str = "google/gemini-2.5-flash-lite") -> str:
+    """呼叫 OpenRouter，最多重試 3 次"""
     for attempt in range(3):
         try:
-            resp = client.models.generate_content(model=model, contents=prompt)
-            return resp.text.strip()
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return resp.choices[0].message.content.strip()
         except Exception as e:
             if attempt < 2:
                 import time; time.sleep(10)

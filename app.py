@@ -23,8 +23,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
 import chromadb
 from chromadb.config import Settings
-from google import genai
-from google.genai import types
+from chromadb.utils import embedding_functions
+from openai import OpenAI
+# ── HuggingFace 模型快取轉移至 2TB 外接硬碟（減少主 SSD 磨耗）──
+os.environ["HF_HOME"] = "/Volumes/2TB/huggingface_cache"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/Volumes/2TB/huggingface_cache"
 import mlx_whisper
 import gc
 import mlx.core as mx
@@ -40,14 +43,17 @@ executor = ThreadPoolExecutor(max_workers=3)
 LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 AUTHORIZED_USER_ID = os.environ.get("LINE_AUTHORIZED_USER_ID", "")
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 CWA_API_KEY = os.getenv("CWA_API_KEY", "")
-MOENV_API_KEY = os.getenv("MOENV_API_KEY", "")  # 選做：環保署 AQI 金鑰
+MOENV_API_KEY = os.getenv("MOENV_API_KEY", "")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY
+)
 
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+line_config = Configuration(**{"access_token": LINE_CHANNEL_ACCESS_TOKEN})
 
 # ── 路徑設定（啟動時自動建立資料夾）────────────────────────────────────────
 BASE_DIR = os.path.expanduser("~/line-mac-bot")
@@ -71,82 +77,93 @@ CORE_TAGS = [
     "[[活動與社區經營]]", "[[論文構想]]",
 ]
 
-# ── Mac 控制工具定義 (Gemini protos 格式) ───────────────────────────────────
+# ── Mac 控制工具定義 (OpenAI 格式) ───────────────────────────────────
 MAC_TOOLS = [
-    types.Tool(
-        function_declarations=[
-            types.FunctionDeclaration(
-                name="run_shell",
-                description="在 Mac Mini 上執行 shell 命令。適用於檔案管理、系統操作、安裝軟體等。",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "command": types.Schema(
-                            type=types.Type.STRING,
-                            description="要執行的 shell 命令"
-                        )
-                    },
-                    required=["command"]
-                )
-            ),
-            types.FunctionDeclaration(
-                name="open_app",
-                description="在 Mac 上開啟應用程式",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "app_name": types.Schema(
-                            type=types.Type.STRING,
-                            description="應用程式名稱，例如：Safari、Music、Finder、Terminal、VS Code"
-                        )
-                    },
-                    required=["app_name"]
-                )
-            ),
-            types.FunctionDeclaration(
-                name="run_applescript",
-                description="執行 AppleScript 進行 GUI 自動化、控制 Mac 系統設定，例如調整音量、播放音樂、顯示通知",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "script": types.Schema(
-                            type=types.Type.STRING,
-                            description="要執行的 AppleScript 程式碼"
-                        )
-                    },
-                    required=["script"]
-                )
-            ),
-            types.FunctionDeclaration(
-                name="get_system_info",
-                description="取得 Mac 系統資訊，包含 CPU 使用率、記憶體、磁碟空間、執行中的程序",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "info_type": types.Schema(
-                            type=types.Type.STRING,
-                            enum=["cpu", "memory", "disk", "processes", "network", "all"],
-                            description="要查詢的資訊類型：cpu/memory/disk/processes/network/all"
-                        )
-                    },
-                    required=["info_type"]
-                )
-            ),
-            types.FunctionDeclaration(
-                name="take_screenshot",
-                description="截取目前 Mac 螢幕畫面，並將圖片儲存到指定路徑",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "save_path": types.Schema(
-                            type=types.Type.STRING,
-                            description="截圖儲存路徑（預設 /tmp/screenshot.png）"
-                        )
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "在 Mac Mini 上執行 shell 命令。適用於檔案管理、系統操作、安裝軟體等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "要執行的 shell 命令"
                     }
-                )
-            ),
-        ]
-    )
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app",
+            "description": "在 Mac 上開啟應用程式",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {
+                        "type": "string",
+                        "description": "應用程式名稱，例如：Safari、Music、Finder、Terminal、VS Code"
+                    }
+                },
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_applescript",
+            "description": "執行 AppleScript 進行 GUI 自動化、控制 Mac 系統設定，例如調整音量、播放音樂、顯示通知",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "script": {
+                        "type": "string",
+                        "description": "要執行的 AppleScript 程式碼"
+                    }
+                },
+                "required": ["script"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_info",
+            "description": "取得 Mac 系統資訊，包含 CPU 使用率、記憶體、磁碟空間、執行中的程序",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "info_type": {
+                        "type": "string",
+                        "enum": ["cpu", "memory", "disk", "processes", "network", "all"],
+                        "description": "要查詢的資訊類型：cpu/memory/disk/processes/network/all"
+                    }
+                },
+                "required": ["info_type"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_screenshot",
+            "description": "截取目前 Mac 螢幕畫面，並將圖片儲存到指定路徑",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "save_path": {
+                        "type": "string",
+                        "description": "截圖儲存路徑（預設 /tmp/screenshot.png）"
+                    }
+                }
+            }
+        }
+    }
 ]
 
 # ── System Prompt（加入筆記分類指令）────────────────────────────────────────
@@ -176,16 +193,16 @@ SYSTEM_PROMPT = (
 
 # ── 安全呼叫 Gemini（自動重試，最多 3 次）──────────────────────────────────
 
-def safe_generate(prompt: str, model_name="gemini-2.5-flash", **kwargs) -> str:
-    """呼叫 client.models.generate_content，遇到例外（含 429 Quota）自動等待 20 秒後重試，最多 3 次"""
+def safe_generate(prompt: str, model_name="google/gemini-2.5-flash-lite", **kwargs) -> str:
+    """呼叫 API，遇到例外自動等待 20 秒後重試，最多 3 次"""
     for attempt in range(3):
         try:
-            resp = client.models.generate_content(
+            resp = client.chat.completions.create(
                 model=model_name,
-                contents=prompt,
+                messages=[{"role": "user", "content": prompt}],
                 **kwargs
             )
-            return resp.text
+            return resp.choices[0].message.content
         except Exception as e:
             print(f"[safe_generate] 第 {attempt + 1} 次失敗：{e}")
             if attempt < 2:
@@ -222,20 +239,16 @@ def search_obsidian(query: str) -> str:
         print(f"[Obsidian] 讀取 Persona.md 失敗：{e}")
 
     # ── 2. 向量語意搜尋 ChromaDB ──────────────────────────────────────────────
-    chroma_db_path = os.path.join(BASE_DIR, "chroma_db")
+    chroma_db_path = "/Volumes/2TB/program/vector"
     if os.path.isdir(chroma_db_path):
         try:
-            client = chromadb.PersistentClient(path=chroma_db_path)
-            collection = client.get_or_create_collection("obsidian_notes")
-            # 使用 Gemini text-embedding-004 對查詢文字做向量化
-            embed_resp = client.models.embed_content(
-                model="text-embedding-004",
-                contents=query,
-                config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-            )
-            query_embedding = embed_resp.embeddings[0].values
+            chroma_client = chromadb.PersistentClient(path=chroma_db_path)
+            emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="paraphrase-multilingual-MiniLM-L12-v2")
+            collection = chroma_client.get_or_create_collection("obsidian_notes", embedding_function=emb_fn)
+            
+            # 使用文字進行向量檢索
             results = collection.query(
-                query_embeddings=[query_embedding],
+                query_texts=[query],
                 n_results=5,
                 include=["documents", "metadatas"]
             )
@@ -1006,40 +1019,46 @@ def execute_tool(name: str, tool_input: dict) -> str:
     return f"未知工具：{name}"
 
 
-# ── Gemini 核心處理 ──────────────────────────────────────────────────────────
+# ── AI 核心處理 ──────────────────────────────────────────────────────────
 
 def process_with_gemini(user_message: str) -> str:
-    """透過 Gemini 處理使用者訊息，執行 Mac 操作，回傳繁體中文結果"""
+    """透過 OpenRouter 處理使用者訊息，執行 Mac 操作，回傳繁體中文結果"""
+    
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_message}
+    ]
 
-    chat = client.chats.create(
-        model="gemini-2.5-flash",
-        config=types.GenerateContentConfig(
-            tools=MAC_TOOLS,
-            system_instruction=SYSTEM_PROMPT,
-        )
-    )
-
-    response = chat.send_message(user_message)
-
-    # 工具循環：持續執行直到 Gemini 完成任務
+    # 工具循環：持續執行直到完成任務
     for _ in range(10):  # 最多 10 輪工具呼叫
-        # 新 SDK format, response.function_calls 取得
-        if not response.function_calls:
+        response = client.chat.completions.create(
+            model="google/gemini-2.5-flash-lite",
+            messages=messages,
+            tools=MAC_TOOLS
+        )
+        message = response.choices[0].message
+
+        if not message.tool_calls:
             # 無工具呼叫，回傳最終文字（可能是 [SAVE_NOTE] 或正常回覆）
-            return response.text or "任務完成"
+            return message.content or "任務完成"
 
+        # 加入 assistant message
+        messages.append(message)
+        
         # 執行所有工具並收集結果
-        fn_responses = []
-        for fc in response.function_calls:
-            result = execute_tool(fc.name, fc.args)
-            fn_responses.append(
-                types.Part.from_function_response(
-                    name=fc.name,
-                    response={"result": result}
-                )
-            )
-
-        response = chat.send_message(fn_responses)
+        import json
+        for tc in message.tool_calls:
+            func_name = tc.function.name
+            try:
+                func_args = json.loads(tc.function.arguments)
+            except Exception:
+                func_args = {}
+            result = execute_tool(func_name, func_args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": str(result)
+            })
 
     return "任務處理完成"
 
@@ -1139,6 +1158,85 @@ def _stop_build_wiki():
         print("[維基掃描] 沒有發現正在執行的程序可以中止")
     except Exception as e:
         print(f"[錯誤][維基掃描] 強制中止失敗: {e}")
+
+
+def _run_convert_kyoizai():
+    """背景執行兒童版教案轉換（轉換教案！）"""
+    import subprocess
+    try:
+        venv_python = os.path.join(BASE_DIR, ".venv", "bin", "python3")
+        script_path = os.path.join(BASE_DIR, "convert_to_children.py")
+        with open("/tmp/kyoizai_convert.log", "w", encoding="utf-8") as f:
+            subprocess.run(
+                [venv_python, "-u", script_path],
+                cwd=BASE_DIR,
+                stdout=f, stderr=subprocess.STDOUT,
+                check=True
+            )
+        print("[轉換教案] 背景執行完成")
+    except Exception as e:
+        print(f"[錯誤][轉換教案] 啟動失敗: {e}")
+
+
+def _run_build_web_materials(force=False):
+    """背景執行雙語自學教材自動化（製作網頁教材！）"""
+    import subprocess
+    try:
+        venv_python = os.path.join(BASE_DIR, ".venv", "bin", "python3")
+        script_path = os.path.join(BASE_DIR, "build_web_materials.py")
+        cmd = [venv_python, "-u", script_path]
+        if force:
+            cmd.append("--force")
+        with open("/tmp/web_materials.log", "w", encoding="utf-8") as f:
+            subprocess.run(
+                cmd,
+                cwd=BASE_DIR,
+                stdout=f, stderr=subprocess.STDOUT,
+                check=True
+            )
+        print("[網頁教材] 背景執行完成")
+    except Exception as e:
+        print(f"[錯誤][網頁教材] 啟動失敗: {e}")
+
+
+def _stop_build_web_materials():
+    """強制停止正在背景執行的網頁教材製作程式"""
+    import subprocess
+    try:
+        subprocess.run(["pkill", "-f", "build_web_materials.py"], check=True)
+        print("[網頁教材] 已強制中止程序")
+    except subprocess.CalledProcessError:
+        print("[網頁教材] 沒有發現正在執行的程序可以中止")
+    except Exception as e:
+        print(f"[錯誤][網頁教材] 強制中止失敗: {e}")
+
+
+KYOIZAI_SKILL_PATH = os.path.expanduser(
+    "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain/系統設定/SKILL_私人維基建置 (掃描教材！）.md"
+)
+
+def _run_scan_kyoizai(force=False):
+    """背景執行教材掃描，使用專屬 SKILL 設定（掃描教材！）"""
+    import subprocess
+    try:
+        cmd = [
+            "/Users/wenhung/book translate/.venv/bin/python3",
+            "-u",
+            "/Users/wenhung/book translate/build_wiki.py",
+            "--config", KYOIZAI_SKILL_PATH
+        ]
+        if force:
+            cmd.append("--force")
+        with open("/tmp/kyoizai_scan.log", "w", encoding="utf-8") as f:
+            subprocess.run(
+                cmd,
+                cwd="/Users/wenhung/book translate",
+                stdout=f, stderr=subprocess.STDOUT,
+                check=True
+            )
+        print("[教材掃描] 背景執行完成")
+    except Exception as e:
+        print(f"[錯誤][教材掃描] 啟動失敗: {e}")
 
 def _query_wiki_background(user_message):
     """背景讀取整個 Wiki 並請求 Gemini 取得洞見，只存檔不推播"""
@@ -1278,6 +1376,63 @@ def on_message(event):
             send_line_reply(event.reply_token, f"無法讀取掃描進度：{e}")
         return
 
+    if raw_clean in ["轉換進度", "教案進度", "兒童版進度"]:
+        try:
+            import os
+            log_path = "/tmp/kyoizai_convert.log"
+            if not os.path.exists(log_path):
+                reply_msg = "目前沒有轉換進度日誌喔！請先執行「轉換教案！」。"
+            else:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                if not lines:
+                    reply_msg = "日誌檔存在但目前是空的，轉換可能剛開始，請稍後再查詢。"
+                else:
+                    last_lines = "".join(lines[-20:])
+                    reply_msg = f"🎒 最新轉換進度：\n\n{last_lines}"
+            send_line_reply(event.reply_token, reply_msg)
+        except Exception as e:
+            send_line_reply(event.reply_token, f"無法讀取轉換進度：{e}")
+        return
+
+    if raw_clean in ["教材進度", "掃描教材進度", "教材掃描進度"]:
+        try:
+            import os
+            log_path = "/tmp/kyoizai_scan.log"
+            if not os.path.exists(log_path):
+                reply_msg = "目前沒有教材掃描進度日誌喔！請先執行「掃描教材！」。"
+            else:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                if not lines:
+                    reply_msg = "日誌檔存在但目前是空的，教材掃描可能剛開始，請稍後再查詢。"
+                else:
+                    last_lines = "".join(lines[-20:])
+                    reply_msg = f"🎓 最新教材掃描進度：\n\n{last_lines}"
+            send_line_reply(event.reply_token, reply_msg)
+        except Exception as e:
+            send_line_reply(event.reply_token, f"無法讀取教材掃描進度：{e}")
+        return
+
+    if raw_clean in ["網頁教材進度", "教材製作進度"]:
+        try:
+            import os
+            log_path = "/tmp/web_materials.log"
+            if not os.path.exists(log_path):
+                reply_msg = "目前沒有網頁教材製作進度日誌喔！請先執行「製作網頁教材！」。"
+            else:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                if not lines:
+                    reply_msg = "日誌檔存在但目前是空的，網頁教材製作可能剛開始，請稍後再查詢。"
+                else:
+                    last_lines = "".join(lines[-20:])
+                    reply_msg = f"📚 最新網頁教材製作進度：\n\n{last_lines}"
+            send_line_reply(event.reply_token, reply_msg)
+        except Exception as e:
+            send_line_reply(event.reply_token, f"無法讀取網頁教材進度：{e}")
+        return
+
     if text.lower().endswith(("wiki?", "wiki？")):
         # ── 全庫維基超級檢索 (Long Context) ──
         clean_text = text[:-5].strip()
@@ -1329,6 +1484,11 @@ def on_message(event):
             executor.submit(_stop_build_wiki)
             return
 
+        if cmd_clean == "停止掃描教材":
+            send_line_reply(event.reply_token, "🛑 正在強制停止教材掃描...")
+            executor.submit(_stop_build_wiki)
+            return
+
         if cmd_clean == "重新掃描文件":
             send_line_reply(event.reply_token, "🧹 收到強制重置指令。將無視舊紀錄，開始重新掃描所有來源檔案重建維基，請稍候。")
             executor.submit(_run_build_wiki, force=True)
@@ -1337,6 +1497,36 @@ def on_message(event):
         if cmd_clean in ["掃描文件", "掃描文章"]:
             send_line_reply(event.reply_token, "✅ 知識庫爬蟲起動中，將會開始依照資料夾建立鏡像維基，請稍候查看 Obsidian 維基目錄刷新。")
             executor.submit(_run_build_wiki)
+            return
+
+        if cmd_clean == "重新掃描教材":
+            send_line_reply(event.reply_token, "🧹 收到強制重置指令。將無視舊紀錄，重新整理所有教材影片，請稍候。")
+            executor.submit(_run_scan_kyoizai, True)
+            return
+
+        if cmd_clean == "掃描教材":
+            send_line_reply(event.reply_token, "🎓 教材掃描起動！將依照「掃描教材！」SKILL 設定整理 YouTube 教材，結果按年月存入 Obsidian，請稍候。")
+            executor.submit(_run_scan_kyoizai)
+            return
+
+        if cmd_clean == "轉換教案":
+            send_line_reply(event.reply_token, "🎒 轉換教案起動！正在搜尋帶有 #待轉兒童版 標籤的文章，用 Claude 改寫成 10 歲小朋友看得懂的版本，完成後存入 Wiki/Youtube兒童教材，請稍候。")
+            executor.submit(_run_convert_kyoizai)
+            return
+
+        if cmd_clean == "製作網頁教材":
+            send_line_reply(event.reply_token, "📚 網頁教材製作起動！將依照 SKILL 設定，用 Gemini 提煉家長版 → Claude 轉譯兒童版，自動組裝成雙層教材並存入 SparkSoul 網站，請稍候。")
+            executor.submit(_run_build_web_materials)
+            return
+
+        if cmd_clean == "重新製作網頁教材":
+            send_line_reply(event.reply_token, "🧹 收到強制重製指令。將無視舊紀錄，重新處理所有教材來源，請稍候。")
+            executor.submit(_run_build_web_materials, force=True)
+            return
+
+        if cmd_clean == "停止製作網頁教材":
+            send_line_reply(event.reply_token, "🛑 正在強制停止網頁教材製作...")
+            executor.submit(_stop_build_web_materials)
             return
 
         try:
@@ -1407,10 +1597,16 @@ def process_audio_transcription(message_id, reply_token):
         print(f"[語音] 音檔長度：{total_min:.1f} 分鐘")
 
         # 第一重：Whisper initial_prompt （內嵌字典，強制提示模型正確發音）
+        # 針對中英文交雜語音優化：明確提示模型保留英文原文
         dict_hint = f"。請務必正確拼寫以下專有名詞：{custom_dict_str}。" if custom_dict_str else ""
         initial_prompt = (
-            f"這是一段台灣家醫科醫師的語音紀錄，請以繁體中文輸出{dict_hint}"
+            f"這是一段台灣家醫科醫師的語音紀錄，內容可能包含中英文交雜。"
+            f"請以繁體中文輸出中文內容，英文單字、醫學術語及專有名詞請保留英文原文"
+            f"{dict_hint}"
         )
+
+        # 升級模型：whisper-large-v3-mlx（完整版 15.4 億參數，中文辨識最強）
+        WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"
 
         raw_parts    = []
         chunk_paths  = []   # 暫存分段檔，用完立刻刪除
@@ -1420,7 +1616,8 @@ def process_audio_transcription(message_id, reply_token):
             print(f"[語音] 短音檔，直接轉錄...")
             result = mlx_whisper.transcribe(
                 temp_audio_path,
-                path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                path_or_hf_repo=WHISPER_MODEL,
+                language="zh",                         # 強制中文模式，避免誤判為日文/韓文
                 initial_prompt=initial_prompt,
                 condition_on_previous_text=False,
                 no_speech_threshold=0.6,
@@ -1449,7 +1646,8 @@ def process_audio_transcription(message_id, reply_token):
                 try:
                     result = mlx_whisper.transcribe(
                         chunk_path,
-                        path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                        path_or_hf_repo=WHISPER_MODEL,
+                        language="zh",                       # 強制中文模式，避免誤判為日文/韓文
                         initial_prompt=initial_prompt,
                         condition_on_previous_text=False,   # 抗幻覺：每段獨立
                         no_speech_threshold=0.6,
@@ -1494,9 +1692,10 @@ def process_audio_transcription(message_id, reply_token):
             "你的任務是：\n\n"
             "1. 修正同音錯字與不通順的斷句，特別是段落交界處。\n"
             f"2. {dict_rule}"
-            "3. 100% 忠於原意，絕對禁止擴充句子、總結重點或自行腦補。\n"
-            "4. 絕對禁止在任何人名或專有名詞前後加上星號 (*) 或任何 Markdown 標示。直接輸出純淨的純文字。\n"
-            "5. 絕對禁止輸出開場白、對話回應或結語。\n\n"
+            "3. 英文單字、醫學術語及專有名詞請保留英文原文，不要翻譯成中文。例如：COVID-19、ICU、EMR、check-in 等應保持英文。\n"
+            "4. 100% 忠於原意，絕對禁止擴充句子、總結重點或自行腦補。\n"
+            "5. 絕對禁止在任何人名或專有名詞前後加上星號 (*) 或任何 Markdown 標示。直接輸出純淨的純文字。\n"
+            "6. 絕對禁止輸出開場白、對話回應或結語。\n\n"
             f"【語音逐字稿內容】\n{raw_text}"
         )
 

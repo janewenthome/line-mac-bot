@@ -21,8 +21,9 @@ import hashlib
 import datetime
 import socket
 import logging
-from pathlib import Path
 from typing import Optional
+
+from openai import OpenAI
 
 import yaml
 
@@ -76,7 +77,7 @@ except ImportError:
     pass
 
 # ── 不可外部化的設定（敏感/路徑相關）──────────────────────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 
 LOG_FILE = Path(__file__).parent / "daily_news_digest.log"
@@ -270,62 +271,43 @@ def call_grok_twitter_insights() -> str:
 
 
 def call_gemini(prompt: str, override_models: list[str] = None) -> Optional[str]:
-    """呼叫 Gemini API 產生摘要，含 429 重試機制。"""
-    import urllib.request
-    import urllib.error
+    """呼叫 OpenRouter API 產生摘要，含重試機制。"""
     import time
-
-    models = override_models or _cfg("gemini.models", ["gemini-2.5-flash", "gemini-2.0-flash-lite"])
+    
+    models = override_models or _cfg("gemini.models", ["google/gemini-2.5-flash-lite", "google/gemini-2.5-flash-lite"])
     temperature = _cfg("gemini.temperature", 0.4)
     max_tokens = _cfg("gemini.max_output_tokens", 12288)
 
-    for model in models:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent?key={GEMINI_API_KEY}"
-        )
-        body = json.dumps({
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-            },
-        }).encode()
+    if not OPENROUTER_API_KEY:
+        log.error("未設定 OPENROUTER_API_KEY")
+        return None
 
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY
+    )
+
+    for model in models:
         for attempt in range(3):
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
             try:
-                with urllib.request.urlopen(req, timeout=90) as resp:
-                    data = json.loads(resp.read())
-                    text = (
-                        data.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text", "")
-                    )
-                    if text:
-                        log.info(f"  ✓ Gemini ({model}) 回應成功")
-                        return text
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    wait = 15 * (2 ** attempt)
-                    log.warning(f"  Gemini ({model}) 429 限流，等待 {wait}s 後重試 ({attempt+1}/3)...")
-                    time.sleep(wait)
-                    continue
-                log.error(f"  Gemini ({model}) HTTP {e.code}: {e.reason}")
-                break
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                text = resp.choices[0].message.content
+                if text:
+                    log.info(f"  ✓ OpenRouter ({model}) 回應成功")
+                    return text
             except Exception as e:
-                log.error(f"  Gemini ({model}) 失敗: {e}")
-                break
+                wait = 15 * (2 ** attempt)
+                log.warning(f"  OpenRouter ({model}) 失敗 ({e})，等待 {wait}s 後重試 ({attempt+1}/3)...")
+                time.sleep(wait)
 
         log.warning(f"  模型 {model} 嘗試失敗，換下一個...")
 
-    log.error("所有 Gemini 模型均失敗。")
+    log.error("所有模型均失敗。")
     return None
 
 

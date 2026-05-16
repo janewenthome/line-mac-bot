@@ -3,8 +3,7 @@ import random
 import time
 from datetime import datetime
 from PyPDF2 import PdfReader
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,23 +17,26 @@ SKILL_FILE = os.path.join(OBSIDIAN_VAULT_PATH, "系統設定", "SKILL：醫學�
 OUT_DIR = os.path.join(OBSIDIAN_VAULT_PATH, "文章存檔", "Wiki", "醫學指引新知")
 MEMORY_FILE = os.path.join(BASE_DIR, "processed_guidelines.txt")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY
+)
 
 
-def safe_generate(prompt: str, system_instruction: str, model_name="gemini-2.5-flash", **kwargs) -> str:
-    """Invokes Gemini model with retries."""
+def safe_generate(prompt: str, system_instruction: str, model_name="google/gemini-2.5-flash-lite", **kwargs) -> str:
+    """Invokes OpenRouter model with retries."""
     for attempt in range(3):
         try:
-            resp = client.models.generate_content(
+            resp = client.chat.completions.create(
                 model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    **kwargs
-                )
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": prompt}
+                ],
+                **kwargs
             )
-            return resp.text
+            return resp.choices[0].message.content
         except Exception as e:
             print(f"[safe_generate] Attempt {attempt + 1} failed: {e}")
             if attempt < 2:

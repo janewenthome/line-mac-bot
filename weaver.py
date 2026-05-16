@@ -1,35 +1,19 @@
 import os
 import time
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-api_key = os.getenv("GEMINI_API_KEY")
+api_key = os.getenv("OPENROUTER_API_KEY", "")
 vault_path = '/Users/wenhung/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second brain'
 
-client = genai.Client(api_key=api_key)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=api_key
+)
 
-# 關閉所有安全審查（避免正常筆記被 PROHIBITED_CONTENT 阻擋）
-SAFETY_SETTINGS = [
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-]
+# Safety settings removed as OpenRouter manages its own
 
 CORE_TAGS = [
     "[[家醫科臨床]]", "[[皮膚病]]", "[[巡迴醫療紀錄]]", "[[糖尿病照護]]", "[[公共衛生]]",
@@ -86,12 +70,11 @@ for root, dirs, files in os.walk(vault_path):
         )
 
         try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(safety_settings=SAFETY_SETTINGS)
+            response = client.chat.completions.create(
+                model="google/gemini-2.5-flash-lite",
+                messages=[{"role": "user", "content": prompt}]
             )
-            result = response.text.strip()
+            result = response.choices[0].message.content.strip()
         except Exception as e:
             print(f"[警告] 處理失敗，跳過此篇：{filename}\n  錯誤：{e}")
             continue
